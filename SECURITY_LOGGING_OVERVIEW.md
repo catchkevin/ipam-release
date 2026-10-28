@@ -65,7 +65,8 @@ information.
 **In brief:**
 - **You keep the data.** IPAM runs on your own server, in your own network, with your own database. It sends nothing to
   its maker: no usage data, no telemetry, no licence check, no outside scripts or fonts. Its only outbound connections
-  are to the mail service you configure and, if an Administrator turns them on, registry lookups of public ranges.
+  are to the mail service you configure, the identity providers you set up for single sign-on, and, if an Administrator
+  turns them on, registry lookups of public ranges.
 - **Nobody sees more than their job needs.** 44 built-in roles, bundled into groups; workspaces that separate network
   plans; guard rails on administrator rights enforced by the server; every API route states the role it needs, and an
   automated test fails if one doesn't.
@@ -76,13 +77,14 @@ information.
   or per user.
 - **Everything is recorded.** Every sign-in, every change (with before and after values), every look at sensitive
   information, every export and every change to a security setting is recorded twice: in IPAM's database and in log
-  files built for your SIEM. 227 events, each with a permanent ID. Every line is chained to the one before it with
+  files built for your SIEM. 241 events, each with a permanent ID. Every line is chained to the one before it with
   SHA-256, so a changed, deleted or inserted line can be found.
 - **Secrets stay secret.** Passwords are stored only as PBKDF2 hashes (600,000 iterations). Passwords, cookies,
   connection strings and mail credentials are never written to a log, and automated tests check it. Mail credentials are
   encrypted at rest.
 - **The limits are stated plainly.** The database, backups and log files are not encrypted by IPAM itself; disk or
-  database encryption is the customer's (section 11). Single sign-on and multi-factor sign-in are on the roadmap
+  database encryption is the customer's (section 11). Single sign-on is available through OIDC providers such as
+  Microsoft Entra ID, which bring the organization's MFA; SAML and on-premises Active Directory are on the roadmap
   (section 30).
 
 **At a glance**
@@ -91,8 +93,8 @@ information.
 |---|---|
 | Deployment | Self-hosted: one Docker container on the customer's Linux server, behind the customer's HTTPS reverse proxy |
 | Data location | The customer's server and database (SQLite, PostgreSQL or SQL Server). Nothing is held by the maker |
-| Outbound connections | The mail service the customer configures (an SMTP relay, or Microsoft 365); registry lookups of public ranges (RDAP, off by default) |
-| Authentication | IPAM accounts; PBKDF2-SHA256 hashes; password rules, expiry, history and lockout. SSO and MFA planned |
+| Outbound connections | The mail service the customer configures (an SMTP relay, or Microsoft 365); the customer's identity providers (OIDC); registry lookups of public ranges (RDAP, off by default) |
+| Authentication | IPAM accounts (PBKDF2-SHA256 hashes; password rules, expiry, history and lockout), and single sign-on through OIDC providers such as Entra ID, with their MFA. SAML and LDAP planned |
 | Sessions | Idle timeout (default 30 min), maximum length (default 12 h), nightly sign-out, Clear All, enforced by the server |
 | Authorization | 44 built-in roles in groups, plus workspaces; every API route checked; changes apply on the next request |
 | Network restriction | IP Allow List (ranges or CIDRs, permanent or temporary), with lock-out protection |
@@ -158,11 +160,18 @@ item above: in most organizations, **Confidential**.
   to contact another site either.
 - **Outbound connections** go to the mail service the customer configures, for notifications and test emails:
   their own SMTP relay, or Microsoft 365 (SMTP with OAuth, or Microsoft Graph; both need Microsoft's sign-in service).
+- **Identity providers** (Administration → Identity Providers, none until an Administrator adds one): IPAM reads
+  each OIDC provider's published settings and signing keys, and exchanges a sign-in code for the person's ID token,
+  over HTTPS. Nothing about anyone is sent before they choose to sign in that way. For Microsoft Entra ID, when someone
+  is in more than 200 groups, IPAM also asks Microsoft Graph for that person's group list, with the sign-in's own access
+  token. For SAML providers, IPAM fetches nothing during a sign-in: it reads a provider's metadata only when an
+  Administrator imports it or runs Test connection. LDAP providers connect to the customer's own domain controllers,
+  over LDAPS or StartTLS.
 - **Registry lookups** (Administration → Registry Lookups, off by default) ask IANA and the five regional internet
   registries over RDAP (HTTPS) who a public range is registered to. Only public network addresses and prefixes are
   sent, never private ones, names or other data. An outbound proxy can be set, and each settings change is audited
   (7060).
-- With email not configured and registry lookups off, IPAM makes no outbound connections at all.
+- With email not configured, no identity provider and registry lookups off, IPAM makes no outbound connections at all.
 - **Links, not content.** The reference pages link to RFCs and Wikipedia; those open only when a user clicks them.
 - **No sub-processors.** The maker processes no customer data, so there are none to list.
 - **The customer owns everything** IPAM stores: the data, the audit history and the logs. Every list can be exported as
@@ -230,6 +239,62 @@ Security wasn't added at the end. A few rules apply to every part of the app.
   they have.
 - The first administrator's one-time password is written to a file on the server, which is deleted once it's been
   changed.
+
+**Single sign-on**
+- The customer's own Administrators set up identity providers on the Identity Providers page, with nothing to change on
+  the server. Three kinds: OpenID Connect (Microsoft Entra ID, Okta, Google and other OIDC providers), SAML 2.0 (Entra
+  ID, ADFS, Okta and other SAML providers), and LDAP / Active Directory (on-premises domain controllers).
+- **The OIDC flow** is the authorization code flow with PKCE, with the state and nonce checked. The ID token's signature
+  is checked against the provider's published keys, and so are its issuer, audience and lifetime. Tokens are never
+  stored or logged.
+- **SAML replies are trusted only when signed** (the response or the assertion) with a certificate an Administrator put
+  on the page.
+- **Each SAML reply is checked:** it must answer a sign-in started from IPAM (its request ID, in the signed assertion
+  too), come from the provider's Entity ID, be for IPAM (the audience), be sent to IPAM's reply address (destination and
+  recipient), be inside its time window, and not have been used before. Over HTTPS, a reply posted from another browser
+  is refused. XML with a DTD is refused. Encrypted assertions aren't supported, because IPAM holds no private key.
+- **SAML certificates are watched:** Administrators get a warning line from 30 days before a provider's signing
+  certificate ends (7076), and another once it has ended (7077).
+- **Signing out** ends the IPAM session. For a SAML provider it can also sign the person out at the provider, if an
+  Administrator turns that on.
+- **LDAP connections are always encrypted** (LDAPS or StartTLS; plain LDAP isn't offered). The domain controllers'
+  certificates are checked against the server's trusted CAs, or against CAs an Administrator puts on the page.
+- **The directory checks LDAP passwords:** IPAM looks the person up with a read-only service account (its password
+  encrypted at rest like the other secrets), then binds as the person on a separate connection. The person's password is
+  never stored or logged. An empty password is refused before the directory is asked, because LDAP would treat it as an
+  anonymous sign-in. What the person types is escaped before it goes into the search, so it can't change the search.
+- **IPAM's lockout comes first for LDAP:** failed sign-ins count toward IPAM's own lockout (1008), and a locked name isn't
+  passed to the directory, so guessing through IPAM can't lock the person's directory account. Accounts disabled in
+  Active Directory are refused before their password is tried; locked ones and expired passwords are refused too, with
+  the reason in the audit log (1061).
+- **People are matched by email address** at their first sign-in, then by the provider's permanent ID for them, so an
+  email change at the directory can't move an account to someone else. A local account with that email is linked and
+  loses its IPAM password.
+- **The provider owns the password:** IPAM's password rules, expiry and reset don't apply to these people, and multi-factor
+  sign-in and conditional access come from the provider.
+- **The directory owns their email address and names.** They follow it at each sign-in, and nobody can change them in IPAM.
+  The server refuses it from every screen, the API and imports, and records the attempt (1062). Whether the account is
+  active, and its groups, roles and workspaces, stay IPAM's.
+- **Local accounts only for allowed domains:** while any identity provider is on, a local (IPAM password) account needs an
+  email address at a domain an Administrator has allowed, such as an external partner's. Everyone else must sign in
+  through single sign-on. An allow list fails safe: a domain nobody thought of is refused. Refusals come from New user,
+  email changes and imports, and are recorded (1064). Local accounts already outside the list keep working and are
+  listed, to convert to a provider (1063). The built-in `admin` is never affected. Every change of the list is recorded
+  (7074).
+- **Directory group mappings** (optional, per provider) let the company's security groups grant IPAM access: a mapped
+  directory group puts its members in an IPAM group. At each sign-in the memberships the directory gave are added or
+  removed to match, and recorded (1065); ones added in IPAM are never touched. A membership from the directory can't be
+  removed in IPAM. Only Administrators change mappings, and each change is recorded (7075). If the group list can't be
+  read, nobody's memberships change.
+- **A provider is turned on only after a successful Test sign-in** of its current settings. A sign-in setting change turns
+  it off until it's tested again. Turning one off ends nobody's session.
+- **The client secret is encrypted at rest** with the app's Data Protection keys, like the mail credentials, and is never
+  shown again.
+- **Local accounts stay** for people outside the organization, and the built-in `admin` always signs in with its IPAM
+  password: the break-glass account if a provider is down. A server command (`identity-providers disable`) turns every
+  provider off as a last resort.
+- **The IP Allow List, the session limits and Clear All** apply to these sign-ins as to any other. Every log line says how
+  its session signed in (`auth_source`).
 - Each user can see, on **My Account**, their own recent sign-ins and every role they have, with what grants it.
 
 **Passwords**
@@ -474,10 +539,19 @@ the host's time service (chrony), and host auditing (auditd, `/var/log/secure`).
 
 ## 14. Secure development and the supply chain
 
-- **Small dependency footprint.** Six third-party .NET libraries: Dapper (database mapping), Microsoft.Data.Sqlite,
-  Npgsql (PostgreSQL), Microsoft.Data.SqlClient (SQL Server), MailKit (mail) and System.Security.Cryptography.Pkcs.
-  The user interface is plain JavaScript with no build step and no Node.js packages; Bootstrap's CSS (5.3.8) and the
-  Tabler icons are bundled, not fetched.
+- **Small dependency footprint.** Ten third-party .NET libraries:
+  - Dapper (database mapping), Microsoft.Data.Sqlite, Npgsql (PostgreSQL), Microsoft.Data.SqlClient (SQL Server);
+  - MailKit (mail), System.Security.Cryptography.Pkcs;
+  - Microsoft.IdentityModel.Protocols.OpenIdConnect (checking single sign-on tokens);
+  - for SAML, ITfoxtec.Identity.Saml2 (BSD-3-Clause) with Microsoft.IdentityModel.Tokens.Saml;
+  - for LDAP, Microsoft's System.DirectoryServices.Protocols, which uses the OpenLDAP client library in the container
+    image.
+
+  SAML's XML signatures are checked with the copy of System.Security.Cryptography.Xml in the .NET runtime, so .NET's
+  security updates cover it.
+- **No known vulnerable packages.** The build treats a package with a published vulnerability as an error.
+- **No front-end packages.** The user interface is plain JavaScript with no build step and no Node.js packages;
+  Bootstrap's CSS (5.3.8) and the Tabler icons are bundled, not fetched.
 - **Built on supported platforms.** .NET 10 (long-term support), with security updates through Microsoft's servicing.
 - **Strict builds.** Every compiler warning is an error, so code with warnings can't ship.
 - **Automated tests**, run before every release: more than 650, covering the IP math at every boundary, CSV escaping and
@@ -633,21 +707,22 @@ Every line has every field, in this order. An empty string means "not applicable
 | 14 | `request_id` | The API call's ID. Error messages on screen show it too, so a user's report can be traced to its lines | `0HNPC80E…:0000003C` |
 | 15 | `session_id` | One ID per sign-in: every action of one sign-in shares it | `133d9876…` |
 | 16–17 | `user`, `user_id` | Who (`system` for IPAM itself) | `jsmith`, `14` |
-| 18–19 | `proxy_by`, `proxy_reason` | Proxy access: the person viewing IPAM as `user`, and the reason they gave. Blank otherwise | `kadmin`, `INC-1234` |
-| 20 | `client_ip` | The address the request came from (the real client behind a trusted reverse proxy) | `198.51.100.23` |
-| 21 | `proxy_chain` | `X-Forwarded-For` as received | `198.51.100.23, 10.0.0.5` |
-| 22 | `user_agent` | The browser's full User-Agent | `Mozilla/5.0 …` |
-| 23–24 | `browser`, `os` | Short forms | `Edge 141`, `Windows` |
-| 25–26 | `http_method`, `path` | The call made, without the query string (screen views: `VIEW` and the screen) | `POST`, `/api/sites` |
-| 27–28 | `http_status`, `duration_ms` | On request lines | `200`, `12` |
-| 29 | `workspace` | The workspace the user was working in | `Production` |
-| 30 | `action` | The action code | `site.update` |
-| 31–32 | `entity_type`, `entity_id` | What it was about | `site`, `7` |
-| 33–34 | `old_values`, `new_values` | Before and after (JSON objects in JSON files) | `{"city":"Seattle"}` |
-| 35 | `error_message` | For errors: the exception and stack trace | |
-| 36 | `audit_id` | The entry's ID in IPAM's database | `4182` |
-| 37 | `category` | For operational messages: where in IPAM they came from | |
-| 38–39 | `prev_hash`, `hash` | The tamper-evidence chain (section 19) | 64 hex characters each |
+| 18 | `auth_source` | How the session signed in: `local` (an IPAM password) or the identity provider's name | `Microsoft Entra ID` |
+| 19–20 | `proxy_by`, `proxy_reason` | Proxy access: the person viewing IPAM as `user`, and the reason they gave. Blank otherwise | `kadmin`, `INC-1234` |
+| 21 | `client_ip` | The address the request came from (the real client behind a trusted reverse proxy) | `198.51.100.23` |
+| 22 | `proxy_chain` | `X-Forwarded-For` as received | `198.51.100.23, 10.0.0.5` |
+| 23 | `user_agent` | The browser's full User-Agent | `Mozilla/5.0 …` |
+| 24–25 | `browser`, `os` | Short forms | `Edge 141`, `Windows` |
+| 26–27 | `http_method`, `path` | The call made, without the query string (screen views: `VIEW` and the screen) | `POST`, `/api/sites` |
+| 28–29 | `http_status`, `duration_ms` | On request lines | `200`, `12` |
+| 30 | `workspace` | The workspace the user was working in | `Production` |
+| 31 | `action` | The action code | `site.update` |
+| 32–33 | `entity_type`, `entity_id` | What it was about | `site`, `7` |
+| 34–35 | `old_values`, `new_values` | Before and after (JSON objects in JSON files) | `{"city":"Seattle"}` |
+| 36 | `error_message` | For errors: the exception and stack trace | |
+| 37 | `audit_id` | The entry's ID in IPAM's database | `4182` |
+| 38 | `category` | For operational messages: where in IPAM they came from | |
+| 39–40 | `prev_hash`, `hash` | The tamper-evidence chain (section 19) | 64 hex characters each |
 
 **What can't be captured, and why.**
 - **A browser's own private (LAN) IP address.** Browsers don't reveal it, and the old trick that exposed it has been
@@ -659,13 +734,13 @@ Every line has every field, in this order. An empty string means "not applicable
 
 ## 18. Event IDs and suggested alerts
 
-IPAM's catalog has **227 events**. Every event has a permanent number, grouped by area like Windows event IDs. An ID is
+IPAM's catalog has **241 events**. Every event has a permanent number, grouped by area like Windows event IDs. An ID is
 never reused or renumbered; new events get new numbers.
 
 | Range | Area | Examples | File |
 |---|---|---|---|
 | 1001–1007, 1031–1032 | Sign-in and sessions | 1001 Signed in · 1002 Sign-in failed · 1003 Signed out · 1004 Session rejected · 1005 Too many sign-in attempts · 1006 Password changed · 1007 Password reset · 1031 Page viewed · 1032 Session expired | access |
-| 1008, 1009, 1015–1019 | Lockout, backup administrator work and proxy access | 1008 Account locked · 1009 Account unlocked · 1015 Backup administrator work started · 1016 Backup administrator work ended · 1017 Proxy access started · 1018 Proxy access ended · 1019 Change refused while viewing as a user | security |
+| 1008, 1009, 1015–1019, 1060–1065 | Lockout, backup administrator work, proxy access and single sign-on | 1008 Account locked · 1009 Account unlocked · 1015 Backup administrator work started · 1016 Backup administrator work ended · 1017 Proxy access started · 1018 Proxy access ended · 1019 Change refused while viewing as a user · 1060 Account linked to an identity provider · 1061 Identity provider sign-in refused · 1062 Change refused: managed by the directory · 1063 Local account converted to an identity provider · 1064 Local account refused: domain not allowed · 1065 Groups brought up to date from the directory | security |
 | 1013, 1014 | Password expiry | 1013 Password expired · 1014 Password expires soon | access |
 | 1010–1051 | Security controls | 1010 Blocked by the IP Allow List · 1011 Access denied · 1012 Request without the security header · 1020–1029, 1033–1034 Sensitive views · 1030 Search · 1040–1043 IP Allow List changes · 1050 Organization Config changed · 1051 Allowed-IP requirement changed | security |
 | 2000s | Users, groups and access | 2001 User created · 2002 User changed · 2003 User's groups changed · 2004 User's workspaces changed · 2005 User's time zone set · 2006 User's email changed · 2007 Role given to a user · 2008 Role taken from a user · 2009 Activity timeout override changed · 2101–2106 Groups | security |
@@ -673,7 +748,7 @@ never reused or renumbered; new events get new numbers.
 | 4000s | Lists | 4001–4003 Sites · 4011–4013 Environments · 4021–4023 Divisions · 4031–4033 Products · 4041–4043 Block types · 4051–4053 IP Use Types · 4061–4063 Circuit providers · 4071–4073 Circuit types · 4081–4083 Vendors · 4091–4093 Tag renamed, merged, deleted · 4101–4103 Product URLs · 4111–4113 VPN Service Purposes | payload |
 | 5000s | Workspaces | 5001–5003 Workspace created, changed, deleted (payload) · 5004–5005 Workspace members (security) | payload / security |
 | 6000s | Export and import | 6001–6024 Exports · 6050 Template downloaded · 6101–6121 Imports | security |
-| 7000s | Settings, sessions, database, backups, logging | 7001 Setting changed · 7003 Session timeouts changed · 7004 All sessions ended · 7020–7024 Database moved or copied · 7030 Log settings changed · 7031/7032 Debug on/off · 7033 Old log files deleted · 7034 Old audit entries purged · 7035 Log write failed · 7036 Log files checked · 7037 Log tampering found · 7038 Log files compressed · 7039 Log files archived · 7041 Log archiving failed · 7042 Old audit entries archived · 7043 Logging degraded · 7044 Logging restored · 7050/7051 Licence key added/removed · 7052 Server ID changed · 7060 Registry lookup settings changed · 7010/7011 Backups (app) · 7002 Logo and 7040 Reference data (payload) | security, app, payload |
+| 7000s | Settings, sessions, database, backups, logging | 7001 Setting changed · 7003 Session timeouts changed · 7004 All sessions ended · 7020–7024 Database moved or copied · 7030 Log settings changed · 7031/7032 Debug on/off · 7033 Old log files deleted · 7034 Old audit entries purged · 7035 Log write failed · 7036 Log files checked · 7037 Log tampering found · 7038 Log files compressed · 7039 Log files archived · 7041 Log archiving failed · 7042 Old audit entries archived · 7043 Logging degraded · 7044 Logging restored · 7050/7051 Licence key added/removed · 7052 Server ID changed · 7060 Registry lookup settings changed · 7070–7073 Identity provider added, changed, deleted, tested · 7074 Allowed local-account domains changed · 7075 Directory group mapping changed · 7076 Identity provider certificate expires soon · 7077 Identity provider certificate expired · 7010/7011 Backups (app) · 7002 Logo and 7040 Reference data (payload) | security, app, payload |
 | 8000s | Email and notifications | 8001 Email settings changed · 8002 Test email sent · 8003 Test email failed · 8010 Notification emailed · 8011 Notification email failed · 8104 Email contact made a user (security); 8101–8103 Email contacts, 8111–8113 Distribution groups (payload) | security, payload |
 | 9000s | System | 9001 IPAM started · 9002 IPAM stopped · 9003 Database upgraded · 9004 Startup blocked · 9005 Database unavailable (security) · 9101 API request (access) · 9102 App message · 9500 Unexpected error (app) · 9900 Debug detail (debug) | as shown |
 
@@ -690,6 +765,11 @@ alerts.
 | Any 1008, especially for the built-in `admin` | An account locked by repeated wrong passwords |
 | Any 1015 | A Backup Administrator is working on other Administrators' accounts |
 | Any 1017 | Someone is viewing IPAM as another user (the reason is in the details); 1019 shows they tried to change something |
+| Sign-ins by the built-in `admin` while an identity provider is on | The break-glass account was used: expected only when a provider is down or being fixed |
+| 1061 in bulk, or any 7070–7072 | Repeated refused single sign-ons (a misconfiguration or an attack), or an identity provider added, changed or deleted |
+| Any 7075, and 1065 that adds someone to Administrators | A directory group now grants IPAM access (to Administrators, it makes everyone in that group an IPAM Administrator) |
+| Any 1060 or 1063 | A local account was linked or converted to an identity provider: its IPAM password stopped working |
+| Any 7076 or 7077 | A SAML provider's signing certificate is about to end, or has ended: sign-ins through it may stop |
 | Any 8011 | A security notification email didn't go out |
 | 2007 with `admin` or `admin.backup` | A powerful role given to a user directly |
 | Any 2009 | A user's sign-in can now last longer than the organization's maximum |
@@ -1084,7 +1164,7 @@ to the controls as commonly cited; your assessor's reading of your scope is what
 | | SC-8 Transmission confidentiality | TLS 1.2/1.3 and HSTS at the proxy |
 | | SC-28 Protection of information at rest | Mail credentials encrypted, passwords hashed; disk and database encryption by the customer |
 | | SI-10 Input validation | Every field checked on the server; imports by the same rules; formula-safe CSV |
-| | SR-3, SR-4 Supply chain | Six libraries, bundled front end, no runtime downloads; SBOM on the roadmap |
+| | SR-3, SR-4 Supply chain | Ten libraries, bundled front end, no runtime downloads; SBOM on the roadmap |
 | **ISO/IEC 27001:2022, Annex A** | 5.15, 5.18, 8.2, 8.3 Access control, access rights, privileged access, restriction | Roles and groups, workspaces, guard rails, every change recorded |
 | | 5.34 Privacy and protection of PII | Section 26 |
 | | 8.5 Secure authentication | PBKDF2, password rules, lockout, generic errors, rate limiting, secure cookie, session limits |
@@ -1116,11 +1196,11 @@ We'd rather a reviewer hear these from us.
 
 | Area | Today | Planned or recommended |
 |---|---|---|
-| Single sign-on and MFA | IPAM's own accounts and passwords, with strong password rules and lockout | Single sign-on, likely Microsoft Entra ID, which brings the organization's MFA and conditional access (planned) |
+| Single sign-on and MFA | IPAM's own accounts and passwords (strong rules, lockout), and single sign-on through OIDC providers such as Microsoft Entra ID, which bring the organization's MFA and conditional access, with company email domains blocked from local accounts | SAML 2.0 and on-premises Active Directory (LDAP); mapping directory groups to IPAM groups (planned) |
 | Database, backups and logs at rest | Not encrypted by IPAM; mail credentials are | Encrypted backups (planned); meanwhile disk, database and share encryption (section 11) |
 | Data Protection keys | In the data folder, protected by file permissions | Protecting the key ring with a certificate or key vault (planned) |
 | Security headers | CSP, framing, sniffing and referrer headers from the app; HSTS from the reverse proxy | HSTS, Permissions-Policy and cross-origin headers from the app itself (planned) |
-| Supply chain evidence | Six libraries, bundled front end, supported .NET | An SBOM and dependency scanning for every release (planned) |
+| Supply chain evidence | Ten libraries, bundled front end, supported .NET | An SBOM and dependency scanning for every release (planned) |
 | Rate limiting | Sign-in, 10 a minute per address | Limits for the rest of the API, stricter for search and export (planned) |
 | Erasure requests | Users are deactivated; names stay in history until retention removes them | Anonymizing a departed user's details while keeping the audit trail intact (planned) |
 | Sending logs to a SIEM | Files and console, collected by the customer's agent | Direct sending to syslog over TLS, Splunk HEC and the Datadog API (planned) |
@@ -1136,8 +1216,8 @@ We'd rather a reviewer hear these from us.
 
 **Does IPAM send any of our data to its maker, or anywhere else?**
 - No. There is no telemetry, usage reporting, licence check or remote support channel. The only outbound connections are
-  to the mail service you configure and, if turned on, registry lookups that send public network addresses only
-  (section 4).
+  to the mail service you configure, the identity providers you set up for single sign-on, and, if turned on, registry
+  lookups that send public network addresses only (section 4).
 
 **Where is our data, and who can reach it?**
 - On your server and in your database, in the location you choose. Only people with an IPAM account, the right role and
